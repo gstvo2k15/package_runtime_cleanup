@@ -1,0 +1,6 @@
+---
+- name: MDW runtime cleanup
+  hosts: all
+  become: true
+  roles:
+    - mdw_runtime_cleanup
