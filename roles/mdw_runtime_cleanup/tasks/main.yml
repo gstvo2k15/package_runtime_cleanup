@@ -1,13 +1,5 @@
 ---
-- name: Create mdw repository
-  ansible.builtin.template:
-    src: mdw.repo.j2
-    dest: "{{ mdw_repo_file }}"
-    owner: root
-    group: root
-    mode: "0644"
-
-- name: Find setenv.sh under /data
+- name: Find setenv.sh under data
   ansible.builtin.find:
     paths: "{{ mdw_setenv_search_root }}"
     patterns: setenv.sh
@@ -15,7 +7,7 @@
     recurse: true
   register: mdw_setenv_files
 
-- name: Fail if no setenv.sh found
+- name: Fail if no setenv.sh was found
   ansible.builtin.fail:
     msg: "No setenv.sh found under {{ mdw_setenv_search_root }}"
   when: mdw_setenv_files.matched | int == 0
@@ -26,19 +18,63 @@
   loop: "{{ mdw_setenv_files.files }}"
   register: mdw_setenv_content
 
-- name: Extract JAVA_HOME and CATALINA_HOME
+- name: Extract JAVA_HOME and CATALINA_HOME paths
   ansible.builtin.set_fact:
     mdw_used_paths: >-
       {{
         (
           mdw_used_paths | default([])
-          + (
-              (item.content | b64decode)
-              | regex_findall('(?m)^\\s*(?:export\\s+)?(?:JAVA_HOME|CATALINA_HOME)=\"?([^\"\\n]+)\"?')
-            )
+          +
+          (
+            (item.content | b64decode)
+            | regex_findall('(?m)^\\s*(?:export\\s+)?(?:JAVA_HOME|CATALINA_HOME)=\"?([^\"\\n]+)\"?')
+          )
         ) | unique
       }}
   loop: "{{ mdw_setenv_content.results }}"
+
+- name: Show runtime paths found in setenv.sh
+  ansible.builtin.debug:
+    var: mdw_used_paths
+
+- name: Build required RPM names from setenv paths
+  ansible.builtin.set_fact:
+    mdw_required_rpms: >-
+      {{
+        (
+          mdw_required_rpms | default([])
+          +
+          (
+            [
+              'mdw-jdk' ~
+              (
+                item
+                | regex_search('jdk([0-9]+)_current$', '\1')
+                | first
+              )
+            ]
+            if item is regex('.*/jdk[0-9]+_current$')
+            else
+            (
+              [
+                'mdw-' ~
+                (
+                  item
+                  | regex_search('/apps/install/(asf|jws)-tomcat([0-9]+)/current$', '\1-tomcat\2')
+                  | first
+                )
+              ]
+              if item is regex('^/apps/install/(asf|jws)-tomcat[0-9]+/current$')
+              else []
+            )
+          )
+        ) | unique
+      }}
+  loop: "{{ mdw_used_paths | default([]) }}"
+
+- name: Show candidate RPMs to install derived from setenv
+  ansible.builtin.debug:
+    msg: "{{ mdw_required_rpms | default([]) }}"
 
 - name: Get installed mdw runtime RPMs
   ansible.builtin.shell: |
@@ -49,7 +85,7 @@
   register: mdw_installed_runtime_rpms
   changed_when: false
 
-- name: List files for each RPM
+- name: List files for each installed mdw runtime RPM
   ansible.builtin.command:
     cmd: "rpm -ql {{ item }}"
   loop: "{{ mdw_installed_runtime_rpms.stdout_lines }}"
@@ -57,38 +93,52 @@
   changed_when: false
   failed_when: false
 
-- name: Determine used RPMs from paths
+- name: Determine used installed RPMs from setenv paths
   ansible.builtin.set_fact:
-    mdw_used_rpms: >-
+    mdw_used_installed_rpms: >-
       {{
         (
-          mdw_used_rpms | default([])
-          + (
-              [item.item]
-              if (
-                mdw_used_paths
-                | select('in', item.stdout)
-                | list
-                | length > 0
-              )
-              else []
+          mdw_used_installed_rpms | default([])
+          +
+          (
+            [item.item]
+            if
+            (
+              mdw_used_paths
+              | select('in', item.stdout)
+              | list
+              | length > 0
             )
+            else []
+          )
         ) | unique
       }}
   loop: "{{ mdw_rpm_files.results }}"
 
-- name: Determine unused RPMs
+- name: Determine unused installed RPMs
   ansible.builtin.set_fact:
-    mdw_unused_rpms: "{{ mdw_installed_runtime_rpms.stdout_lines | difference(mdw_used_rpms | default([])) }}"
+    mdw_unused_rpms: >-
+      {{
+        mdw_installed_runtime_rpms.stdout_lines
+        | difference(mdw_used_installed_rpms | default([]))
+      }}
 
-- name: Remove unused jdk/tomcat RPMs
+- name: Show installed RPMs currently used by setenv
+  ansible.builtin.debug:
+    msg: "{{ mdw_used_installed_rpms | default([]) }}"
+
+- name: Show candidate RPMs to remove
+  ansible.builtin.debug:
+    msg: "{{ mdw_unused_rpms | default([]) }}"
+
+- name: Remove unused mdw jdk/tomcat RPMs
   ansible.builtin.dnf:
     name: "{{ mdw_unused_rpms }}"
     state: absent
   when: mdw_unused_rpms | length > 0
 
-- name: Ensure required RPMs from setenv are installed
+- name: Install required RPMs from setenv
   ansible.builtin.dnf:
-    name: "{{ item | regex_replace('-.+$', '') }}"
+    name: "{{ mdw_required_rpms }}"
     state: present
-  loop: "{{ mdw_used_rpms | default([]) }}"
+  when: mdw_required_rpms | length > 0
