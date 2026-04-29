@@ -1,0 +1,8 @@
+---
+mdw_repo_file: /etc/yum.repos.d/mdw.repo
+mdw_setenv_search_root: /data
+
+mdw_runtime_rpm_query_patterns:
+  - '^mdw-jdk'
+  - '^mdw-asf-tomcat'
+  - '^mdw-jws-tomcat'
